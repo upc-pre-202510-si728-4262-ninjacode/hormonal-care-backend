@@ -1,6 +1,8 @@
 package com.backend.hormonalcare.medicalRecord.interfaces.rest;
 
 import com.backend.hormonalcare.medicalRecord.domain.model.commands.UpdateDoctorCommand;
+import com.backend.hormonalcare.medicalRecord.domain.model.queries.GetAllDoctorsQuery;
+import com.backend.hormonalcare.medicalRecord.domain.model.queries.GetAllMedicalAppointmentQuery;
 import com.backend.hormonalcare.medicalRecord.domain.model.queries.GetDoctorByDoctorRecordIdQuery;
 import com.backend.hormonalcare.medicalRecord.domain.model.queries.GetDoctorByIdQuery;
 import com.backend.hormonalcare.medicalRecord.domain.model.queries.GetDoctorByProfileIdQuery;
@@ -11,10 +13,20 @@ import com.backend.hormonalcare.medicalRecord.domain.services.DoctorCommandServi
 import com.backend.hormonalcare.medicalRecord.domain.services.DoctorQueryService;
 import com.backend.hormonalcare.medicalRecord.interfaces.rest.resources.CreateDoctorResource;
 import com.backend.hormonalcare.medicalRecord.interfaces.rest.resources.DoctorResource;
+import com.backend.hormonalcare.medicalRecord.interfaces.rest.resources.DoctorWithProfileResource;
+import com.backend.hormonalcare.medicalRecord.interfaces.rest.resources.MedicalAppointmentResource;
 import com.backend.hormonalcare.medicalRecord.interfaces.rest.resources.UpdateDoctorResource;
 import com.backend.hormonalcare.medicalRecord.interfaces.rest.transform.CreateDoctorCommandFromResourceAssembler;
 import com.backend.hormonalcare.medicalRecord.interfaces.rest.transform.DoctorResourceFromEntityAssembler;
+import com.backend.hormonalcare.medicalRecord.interfaces.rest.transform.DoctorWithProfileResourceFromEntityAssembler;
+import com.backend.hormonalcare.medicalRecord.interfaces.rest.transform.MedicalAppointmentResourceFromEntityAssembler;
 import com.backend.hormonalcare.medicalRecord.interfaces.rest.transform.UpdateDoctorCommandFromResourceAssembler;
+import com.backend.hormonalcare.profile.interfaces.acl.ProfileDetails;
+import com.backend.hormonalcare.medicalRecord.application.internal.outboundservices.acl.ExternalProfileService;
+
+import java.util.List;
+import java.util.stream.Collectors;
+
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -25,10 +37,12 @@ import org.springframework.web.bind.annotation.*;
 public class DoctorController {
     private final DoctorCommandService doctorCommandService;
     private final DoctorQueryService doctorQueryService;
+    private final ExternalProfileService externalProfileService;
 
-    public DoctorController(DoctorCommandService doctorCommandService, DoctorQueryService doctorQueryService) {
+    public DoctorController(DoctorCommandService doctorCommandService, DoctorQueryService doctorQueryService, ExternalProfileService externalProfileService) {
         this.doctorCommandService = doctorCommandService;
         this.doctorQueryService = doctorQueryService;
+        this.externalProfileService = externalProfileService;
     }
 
     @PostMapping
@@ -81,12 +95,20 @@ public class DoctorController {
     }
 
     @GetMapping("/{doctorId}")
-    public ResponseEntity<DoctorResource> getDoctorById(@PathVariable Long doctorId){
+    public ResponseEntity<DoctorWithProfileResource> getDoctorById(@PathVariable Long doctorId) {
         var getDoctorByIdQuery = new GetDoctorByIdQuery(doctorId);
-        var doctor = doctorQueryService.handle(getDoctorByIdQuery);
-        if(doctor.isEmpty()) return ResponseEntity.notFound().build();
-        var doctorResource = DoctorResourceFromEntityAssembler.toResourceFromEntity(doctor.get());
-        return ResponseEntity.ok(doctorResource);
+        var doctorOptional = doctorQueryService.handle(getDoctorByIdQuery);
+
+        if (doctorOptional.isEmpty()) {
+            return ResponseEntity.notFound().build();
+        }
+
+        var doctor = doctorOptional.get();
+        var profileDetailsOptional = externalProfileService.fetchProfileDetails(doctor.getProfileId());
+        var profileDetails = profileDetailsOptional.orElse(null);
+
+        var doctorWithProfileResource = DoctorWithProfileResourceFromEntityAssembler.toResourceFromEntity(doctor, profileDetails);
+        return ResponseEntity.ok(doctorWithProfileResource);
     }
 
     @PutMapping("/{doctorId}")
@@ -96,5 +118,16 @@ public class DoctorController {
         if(updatedDoctor.isEmpty()) return ResponseEntity.notFound().build();
         var doctorResource = DoctorResourceFromEntityAssembler.toResourceFromEntity(updatedDoctor.get());
         return ResponseEntity.ok(doctorResource);
+    }
+
+    @GetMapping
+    public ResponseEntity<List<DoctorWithProfileResource>> getAllDoctors() {
+        var doctors = doctorQueryService.handle(new GetAllDoctorsQuery());
+        var doctorWithProfileResources = doctors.stream().map(doctor -> {
+            var profileDetailsOptional = externalProfileService.fetchProfileDetails(doctor.getProfileId());
+            var profileDetails = profileDetailsOptional.orElse(null);
+            return DoctorWithProfileResourceFromEntityAssembler.toResourceFromEntity(doctor, profileDetails);
+        }).toList();
+        return ResponseEntity.ok(doctorWithProfileResources);
     }
 }
