@@ -10,26 +10,82 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.multipart.MultipartFile;
+import com.backend.hormonalcare.profile.application.internal.outboundservices.acl.SupabaseStorageServiceProfile;
+import com.backend.hormonalcare.profile.domain.model.aggregates.Profile;
+import com.backend.hormonalcare.profile.domain.model.commands.CreateProfileCommand;
+import com.backend.hormonalcare.profile.domain.model.commands.DeleteProfileImageCommand;
+
+import java.io.IOException;
+import java.text.ParseException;
+import java.text.SimpleDateFormat;
+import java.util.Date;
 
 @RestController
-@RequestMapping(value = "/api/v1/profile/profile", produces = MediaType.APPLICATION_JSON_VALUE)
+@RequestMapping(value = "/api/v1/profile", produces = MediaType.APPLICATION_JSON_VALUE)
 public class ProfileController {
     private final ProfileCommandService profileCommandService;
     private final ProfileQueryService profileQueryService;
+    private final SupabaseStorageServiceProfile supabaseStorageService;
 
-    public ProfileController(ProfileCommandService profileCommandService, ProfileQueryService profileQueryService) {
+    public ProfileController(ProfileCommandService profileCommandService, ProfileQueryService profileQueryService, SupabaseStorageServiceProfile supabaseStorageService) {
         this.profileCommandService = profileCommandService;
         this.profileQueryService = profileQueryService;
-    }
-    @PostMapping
-    public ResponseEntity<ProfileResource> createProfile(@RequestBody CreateProfileResource resource){
-        var createProfileCommand = CreateProfileCommandFromResourceAssembler.toCommandFromResource(resource);
-        var profile = profileCommandService.handle(createProfileCommand);
-        if(profile.isEmpty()) return ResponseEntity.badRequest().build();
-        var profileResource = ProfileResourceFromEntityAssembler.toResourceFromEntity(profile.get());
-        return new ResponseEntity<>(profileResource, HttpStatus.CREATED);
+        this.supabaseStorageService = supabaseStorageService;
     }
 
+    @PostMapping(value = "", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public ResponseEntity<ProfileResource> createProfile(
+            @RequestParam("firstName") String firstName,
+            @RequestParam("lastName") String lastName,
+            @RequestParam("gender") String gender,
+            @RequestParam("phoneNumber") String phoneNumber,
+            @RequestParam("birthday") String birthday,
+            @RequestParam("userId") Long userId,
+            @RequestParam(value = "file", required = false) MultipartFile file) {
+        try {
+            String image = null;
+            if (file != null && !file.isEmpty()) {
+                image = supabaseStorageService.uploadFile(file.getBytes(), file.getOriginalFilename());
+            }
+
+            // Convertir el string de fecha a un objeto Date
+            Date birthdayDate;
+            try {
+                birthdayDate = new SimpleDateFormat("yyyy-MM-dd").parse(birthday);
+            } catch (ParseException e) {
+                return ResponseEntity.badRequest().build();
+            }
+
+            // Crear el comando con la URL de la imagen
+            var createProfileCommand = new CreateProfileCommand(
+                    firstName,
+                    lastName,
+                    gender,
+                    phoneNumber,
+                    image,  // URL de la imagen subida
+                    birthdayDate,
+                    userId
+            );
+
+            var profile = profileCommandService.handle(createProfileCommand);
+            if (profile.isEmpty()) {
+                return ResponseEntity.badRequest().build();
+            }
+
+            var profileResource = ProfileResourceFromEntityAssembler.toResourceFromEntity(profile.get());
+            return new ResponseEntity<>(profileResource, HttpStatus.CREATED);
+        }  catch (Exception e) {
+            e.printStackTrace(); // O usa un logger
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(null);
+        }
+
+    }
+
+    @PostMapping("/test")
+public ResponseEntity<String> testEndpoint() {
+    return ResponseEntity.ok("Endpoint funcionando correctamente");
+}
 
     @GetMapping("/userId/exists/{userId}")
     public ResponseEntity<Boolean> doesProfileExistByUserId(@PathVariable Long userId) {
@@ -65,13 +121,49 @@ public class ProfileController {
         return ResponseEntity.ok(profileResource);
     }
 
-    @PutMapping("/{profileId}/image")
-    public ResponseEntity<ProfileResource> updateProfileImage(@PathVariable Long profileId, @RequestBody UpdateProfileImageResource updateProfileImageResource){
-        var updateProfileImageCommand = UpdateProfileImageCommandFromResourceAssembler.toCommandFromResource(profileId, updateProfileImageResource);
-        var updateProfileImage = profileCommandService.handle(updateProfileImageCommand);
-        if(updateProfileImage.isEmpty()) return ResponseEntity.notFound().build();
-        var profileResource = ProfileResourceFromEntityAssembler.toResourceFromEntity(updateProfileImage.get());
-        return ResponseEntity.ok(profileResource);
+    @PutMapping(value = "/{profileId}/image", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public ResponseEntity<ProfileResource> updateProfileImage(@PathVariable Long profileId, @RequestParam("file") MultipartFile file) {
+        try {
+            // Verificar si el archivo está vacío
+            if (file.isEmpty()) {
+                return ResponseEntity.badRequest().build();
+            }
+
+            // Subir el archivo y obtener la URL
+            String url = supabaseStorageService.uploadFile(file.getBytes(), file.getOriginalFilename());
+
+            // Si la URL es nula o vacía, devolver un error
+            if (url == null || url.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+            }
+
+            // Obtener el perfil actual para eliminar la imagen antigua
+            var currentProfile = profileQueryService.handle(new GetProfileByIdQuery(profileId));
+            if (currentProfile.isEmpty()) {
+                return ResponseEntity.notFound().build();
+            }
+
+            String oldImageUrl = currentProfile.get().getImage();
+            if (oldImageUrl != null && !oldImageUrl.isEmpty()) {
+                String oldImagePath = oldImageUrl.replace(supabaseStorageService.getProperties().getUrl() + "/storage/v1/object/public/" + supabaseStorageService.getProperties().getBucket() + "/", "");
+                supabaseStorageService.deleteFile(oldImagePath);
+            }
+
+            // Crear el comando para actualizar la imagen del perfil
+            var updateProfileImageCommand = UpdateProfileImageCommandFromResourceAssembler.toCommandFromUrl(profileId, url);
+            var updateProfileImage = profileCommandService.handle(updateProfileImageCommand);
+
+            if (updateProfileImage.isEmpty()) {
+                return ResponseEntity.notFound().build();
+            }
+            Profile updatedProfile = updateProfileImage.get();
+            var profileResource = ProfileResourceFromEntityAssembler.toResourceFromEntity(updatedProfile);
+            return ResponseEntity.ok(profileResource);
+
+        } catch (IOException e) {
+            e.printStackTrace(); // O usa un logger
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
     }
 
     @PutMapping("/{profileId}/phoneNumber")
@@ -84,6 +176,17 @@ public class ProfileController {
 
     }
 
+    @DeleteMapping(value = "/{profileId}/image")
+    public ResponseEntity<Void> deleteProfileImage(@PathVariable Long profileId) {
+        try {
+            var deleteProfileImageCommand = new DeleteProfileImageCommand(profileId);
+            profileCommandService.handle(deleteProfileImageCommand);
+            return ResponseEntity.noContent().build();
+        } catch (Exception e) {
+            e.printStackTrace(); // O usa un logger
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
+    }
 
 }
 

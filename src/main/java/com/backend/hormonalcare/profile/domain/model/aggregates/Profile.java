@@ -16,7 +16,7 @@ public class Profile extends AuditableAbstractAggregateRoot<Profile> {
     @Embedded
     @Column()
     private PersonName name;
-
+// 
     @Embedded
     private Gender gender;
 
@@ -52,6 +52,15 @@ public class Profile extends AuditableAbstractAggregateRoot<Profile> {
         this.gender = new Gender(command.gender());
         this.phoneNumber = new PhoneNumber(command.phoneNumber());
         this.image = command.image();
+        this.user = user;
+    }
+
+    public Profile(CreateProfileCommand command, User user, String imageUrl) {
+        this.name = new PersonName(command.firstName(), command.lastName());
+        this.birthday = new Birthday(command.birthday());
+        this.gender = new Gender(command.gender());
+        this.phoneNumber = new PhoneNumber(command.phoneNumber());
+        this.image = imageUrl;
         this.user = user;
     }
 
